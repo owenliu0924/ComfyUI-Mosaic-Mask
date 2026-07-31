@@ -1,79 +1,113 @@
-import numpy as np
+from pathlib import Path
+
 import cv2
+import numpy as np
 import torch
 
-import os
-file_path = os.path.dirname(os.path.abspath(__file__))
+
+GRID_DIR = Path(__file__).with_name("grids")
+TEMPLATE_SIZES = range(5, 21)
+
 
 class MosaicMask:
     def __init__(self):
-        pass
+        self.templates = []
+        for size in TEMPLATE_SIZES:
+            path = GRID_DIR / f"pattern{size}x{size}.png"
+            template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if template is None:
+                raise FileNotFoundError(f"Unable to load mosaic template: {path}")
+            self.templates.append((size, template))
 
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required": {
-               "image": ("IMAGE",),
-               "top_n": ("INT", {"default": 1, "min": 1, "max": 10, "step": 1}),
-               "kernel_size": ("INT", {"default": 3, "min": 0, "max": 100, "step": 1}),
-            }
+                "image": ("IMAGE",),
+                "top_n": ("INT", {"default": 1, "min": 1, "max": 10, "step": 1}),
+                "kernel_size": ("INT", {"default": 3, "min": 0, "max": 100, "step": 1}),
+            },
+            "optional": {
+                "threshold": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "min_grid_size": ("INT", {"default": 10, "min": 5, "max": 20, "step": 1}),
+                "max_grid_size": ("INT", {"default": 20, "min": 5, "max": 20, "step": 1}),
+            },
         }
 
-    RETURN_TYPES = ("MASK", )
-    RETURN_NAMES = ("mosaic_mask", )
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("mosaic_mask",)
     FUNCTION = "get_mask"
-    #OUTPUT_NODE = False
     CATEGORY = "Mosaic Masking"
-    
-    def get_mask(self, image, top_n, kernel_size):
-       
-        image_np = image.squeeze(0).numpy()
-        image_np = (image_np*255).astype(np.uint8)
-        img_rgb = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-        img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2GRAY)
-        img_gray = cv2.Canny(img_gray, 10, 20)
-        img_gray = 255 - img_gray
-        img_gray = cv2.GaussianBlur(img_gray, (3, 3), 0)
-        mask = np.zeros_like(img_gray, dtype=np.uint8)
-        
-        for i in range(10, 20 + 1):
-            pattern_filename = f"{file_path}/grids/pattern{i}x{i}.png"
-            template = cv2.imread(pattern_filename, 0)
-            w, h = template.shape[::-1]
-            img_kensyutu_kekka = cv2.matchTemplate(img_gray, template, cv2.TM_CCOEFF_NORMED)
-            threshold = 0.3
-            loc = np.where(img_kensyutu_kekka >= threshold)
-            for pt in zip(*loc[::-1]):
-                cv2.rectangle(mask, pt, (pt[0] + w, pt[1] + h), (255), -1)
-        
-        kernel = np.ones((kernel_size, kernel_size), np.uint8)
-        expanded_mask = cv2.dilate(mask, kernel, iterations=1)
-        largest_mask = self.keep_largest_component(expanded_mask, top_n)
-        expanded_mask_tensor = torch.from_numpy(largest_mask).unsqueeze(0).to(torch.float32)
 
-        return expanded_mask_tensor
-    
+    def get_mask(
+        self, image, top_n, kernel_size, threshold=0.3, min_grid_size=10, max_grid_size=20
+    ):
+        images = image.detach().to(device="cpu", dtype=torch.float32).numpy()
+        if images.ndim != 4 or images.shape[-1] < 3:
+            raise ValueError(
+                f"Expected IMAGE with shape [batch, height, width, channels], got {images.shape}"
+            )
+        if min_grid_size > max_grid_size:
+            raise ValueError("min_grid_size cannot exceed max_grid_size")
 
-    def keep_largest_component(self, mask, top_n=1):
+        images = np.clip(images[..., :3] * 255.0, 0, 255).astype(np.uint8)
+        masks = np.stack(
+            [
+                self.detect_mosaic(
+                    image_np, top_n, kernel_size, threshold, min_grid_size, max_grid_size
+                )
+                for image_np in images
+            ]
+        )
+        return (torch.from_numpy(masks).to(device=image.device, dtype=torch.float32),)
+
+    def detect_mosaic(
+        self, image, top_n, kernel_size, threshold, min_grid_size, max_grid_size
+    ):
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        gray = cv2.Canny(gray, 10, 20)
+        gray = cv2.GaussianBlur(255 - gray, (3, 3), 0)
+
+        height, width = gray.shape
+        coverage = np.zeros((height + 1, width + 1), dtype=np.int32)
+        for size, template in self.templates:
+            if not min_grid_size <= size <= max_grid_size:
+                continue
+            template_height, template_width = template.shape
+            if template_height > height or template_width > width:
+                continue
+
+            matches = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+            ys, xs = np.where(matches >= threshold)
+            if not len(xs):
+                continue
+
+            np.add.at(coverage, (ys, xs), 1)
+            np.add.at(coverage, (ys + template_height, xs), -1)
+            np.add.at(coverage, (ys, xs + template_width), -1)
+            np.add.at(coverage, (ys + template_height, xs + template_width), 1)
+
+        mask = (coverage.cumsum(0).cumsum(1)[:-1, :-1] > 0).astype(np.uint8)
+        if kernel_size > 1:
+            mask = cv2.dilate(mask, np.ones((kernel_size, kernel_size), np.uint8), iterations=1)
+        return self.keep_largest_component(mask, top_n)
+
+    @staticmethod
+    def keep_largest_component(mask, top_n=1):
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        if num_labels <= 1:
+        component_count = num_labels - 1
+        if component_count <= top_n:
             return mask
-        
-        areas = stats[1:, cv2.CC_STAT_AREA]
-        
-        top_n_indices = np.argsort(areas)[-top_n:]
 
-        top_n_mask = np.zeros_like(mask)
-        for idx in top_n_indices:
-            top_n_mask[labels == (idx + 1)] = 255
-        
-        return top_n_mask
-    
+        areas = stats[1:, cv2.CC_STAT_AREA]
+        kept_labels = np.argpartition(areas, -top_n)[-top_n:] + 1
+        return np.isin(labels, kept_labels).astype(np.uint8)
+
+
 NODE_CLASS_MAPPINGS = {
     "MosaicMask": MosaicMask,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MosaicMask": "MosaicMask",
-    
 }

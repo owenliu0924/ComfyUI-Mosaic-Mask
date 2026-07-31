@@ -1,33 +1,39 @@
 # ComfyUI-Mosaic-Mask
 
-ComfyUI-Mosaic-Mask is an automatic tool designed to detect and mask mosaic areas in input images.
+ComfyUI-Mosaic-Mask detects regular mosaic grids in images and returns the detected areas as a ComfyUI mask.
 
 ![Example](./example/example.png)
 
 ## Features
 
-- Automatically detect mosaic areas in images.
-- Mask the detected mosaic areas with customizable grid patterns.
+- Detects mosaic-like grid patterns with OpenCV template matching.
+- Supports image batches.
+- Returns a standard `0.0` to `1.0` ComfyUI `MASK`.
+- Keeps the largest disconnected regions and optionally expands them.
 
 ## Installation
 
-To install and use ComfyUI-Mosaic-Mask, follow these steps:
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/okgo4/ComfyUI-Mosaic-Mask.git
+python -m pip install -r ComfyUI-Mosaic-Mask/requirements.txt
+```
 
-    git clone https://github.com/okgo4/ComfyUI-Mosaic-Mask.git
+Restart ComfyUI after installation.
 
-   
 ## Usage
 
-Please follow the example.json for a basic template.
+Load `example.json` or add `MosaicMask` from the `Mosaic Masking` category.
 
-The `top_n` parameter controls how many noncontinuous censored areas to be returned (The algorithm will sort the censored parts based on their area).
+- `top_n`: maximum number of disconnected regions to keep, ordered by area.
+- `kernel_size`: dilation kernel size. Use `0` or `1` for no expansion.
+- `threshold`: template matching threshold. Higher values reduce false positives but may miss mosaics.
+- `min_grid_size` / `max_grid_size`: bundled template range to search. The default is 10 through 20; lower the minimum to detect finer grids.
 
-The `kernel_size` parameter refers to how many pixels to expand upon the censored areas.
+The node includes grid templates from size 5 through 20. It works best with axis-aligned, regular square mosaics. Rotated grids, perspective distortion, unsupported scales, and naturally repetitive textures may produce missed detections or false positives.
 
-## Important
+A smoothing node may still be added for softer mask edges, but it is no longer required to normalize the output.
 
-It is worth noting that the `Mask Smooth Region` node is **STRONGLY RECOMMENDED** after the `MosaicMask` node. Otherwise, when sampling an image without smoothed mask, the image may become black.
+## Thanks
 
-## Thanks 
-Special thanks to the mosasic_detector project: https://github.com/summer4an/mosaic_detector.
-
+Special thanks to the [mosaic_detector](https://github.com/summer4an/mosaic_detector) project.
