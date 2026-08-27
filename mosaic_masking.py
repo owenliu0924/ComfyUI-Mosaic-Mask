@@ -17,7 +17,27 @@ class MosaicMask:
             template = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
             if template is None:
                 raise FileNotFoundError(f"Unable to load mosaic template: {path}")
-            self.templates.append((size, template))
+
+            # Some OpenCV environments can return grayscale images with a
+            # singleton channel dimension (H, W, 1). Normalize templates to a
+            # true 2D grayscale array so shape unpacking and matchTemplate are
+            # consistent across environments.
+            if template.ndim == 3:
+                if template.shape[-1] == 1:
+                    template = template[..., 0]
+                elif template.shape[-1] == 3:
+                    template = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+                elif template.shape[-1] == 4:
+                    template = cv2.cvtColor(template, cv2.COLOR_BGRA2GRAY)
+                else:
+                    raise ValueError(
+                        f"Unsupported template channel count for {path}: {template.shape}"
+                    )
+
+            if template.ndim != 2:
+                raise ValueError(f"Expected a 2D grayscale template for {path}, got {template.shape}")
+
+            self.templates.append((size, np.ascontiguousarray(template)))
 
     @classmethod
     def INPUT_TYPES(cls):
